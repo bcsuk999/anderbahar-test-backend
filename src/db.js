@@ -5,9 +5,12 @@ requireConfig('databaseUrl');
 
 // Direct Postgres pool — the primary database layer for this backend.
 // (Connection string from Supabase Dashboard -> Connect -> Session pooler / direct.)
+// `family: 4` forces IPv4 — some hosts (Render/Railway) lack IPv6 routing and
+// Node would otherwise try the IPv6 address first and fail with ENETUNREACH.
 export const pool = new pg.Pool({
   connectionString: config.databaseUrl,
   ssl: { rejectUnauthorized: false },
+  family: 4,
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000,
