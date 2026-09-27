@@ -1,6 +1,6 @@
 import { WebSocketServer } from 'ws';
 import { config } from './config.js';
-import { sb } from './supabase.js';
+import { pool } from './db.js';
 import { register, login, verifyGameToken } from './auth.js';
 import { getLedger, getBalance } from './ledger.js';
 
@@ -22,10 +22,10 @@ export function createWSServer({ game }) {
       }
 
       try {
-        await handleMessage(ws, msg, clients);
+        await handleMessage(ws, msg, clients, game);
       } catch (e) {
         console.error('handler error:', e.message);
-        send(ws, { type: msg.type, ok: false, error: 'server_error', message: e.message });
+        send(ws, { id: msg.id, type: msg.type, ok: false, error: 'server_error', message: e.message });
       }
     });
 
@@ -43,14 +43,19 @@ export function createWSServer({ game }) {
     }
   });
 
-  return { wss, broadcast: (obj) => {
-    for (const [ws] of clients) if (ws.readyState === 1) send(ws, obj);
-  } };
+  return {
+    wss,
+    broadcast: (obj) => {
+      for (const [ws] of clients) if (ws.readyState === 1) send(ws, obj);
+    },
+  };
 }
 
-async function handleMessage(ws, msg, clients) {
+async function handleMessage(ws, msg, clients, game) {
   const type = msg.type;
+  const id = msg.id;
   const ctx = clients.get(ws);
+  const respond = (obj) => send(ws, { id, ...obj });
 
   switch (type) {
     // ---------- AUTH ----------
@@ -59,7 +64,7 @@ async function handleMessage(ws, msg, clients) {
       const { mobile, password, username } = msg;
       const res = await register(mobile, password, username);
       if (res.ok) ctx.userId = res.user.id;
-      send(ws, { type, ...res });
+      respond({ type, ...res });
       break;
     }
 
@@ -68,60 +73,58 @@ async function handleMessage(ws, msg, clients) {
       const { mobile, password } = msg;
       const res = await login(mobile, password);
       if (res.ok) ctx.userId = res.user.id;
-      send(ws, { type, ...res });
+      respond({ type, ...res });
       break;
     }
 
     case 'auth_token': {
-      // Re-auth using a previously issued game token.
       const userId = verifyGameToken(msg.token);
       if (!userId) {
-        send(ws, { type, ok: false, message: 'invalid_token' });
+        respond({ type, ok: false, message: 'invalid_token' });
       } else {
         ctx.userId = userId;
-        send(ws, { type, ok: true, userId });
+        respond({ type, ok: true, userId });
       }
       break;
     }
 
-    // ---------- PROTECTED (requires login) ----------
+    // ---------- PROTECTED ----------
     case 'ledger': {
       const u = requireAuth(ctx);
-      if (!u) return send(ws, { type, ok: false, message: 'not_authenticated' });
+      if (!u) return respond({ type, ok: false, message: 'not_authenticated' });
       const res = await getLedger(u, { limit: msg.limit || 50, offset: msg.offset || 0 });
-      send(ws, { type, ...res });
+      respond({ type, ...res });
       break;
     }
 
     case 'balance': {
       const u = requireAuth(ctx);
-      if (!u) return send(ws, { type, ok: false, message: 'not_authenticated' });
+      if (!u) return respond({ type, ok: false, message: 'not_authenticated' });
       const res = await getBalance(u);
-      send(ws, { type, ...res });
+      respond({ type, ...res });
       break;
     }
 
     case 'bet': {
       const u = requireAuth(ctx);
-      if (!u) return send(ws, { type, ok: false, message: 'not_authenticated' });
-      await placeBet(ws, u, msg, ctx);
+      if (!u) return respond({ type, ok: false, message: 'not_authenticated' });
+      await placeBet(ws, u, msg, respond, game);
       break;
     }
 
     case 'game_state': {
-      // Public - no auth needed to watch a round.
-      send(ws, { type, ok: true, state: game.snapshot() });
+      respond({ type, ok: true, state: game.snapshot() });
       break;
     }
 
     default:
-      send(ws, { type, ok: false, error: 'unknown_type' });
+      respond({ type, ok: false, error: 'unknown_type' });
   }
 }
 
-async function placeBet(ws, userId, msg, ctx) {
+async function placeBet(ws, userId, msg, respond, game) {
   if (game.phase !== 'betting') {
-    return send(ws, { type: 'bet', ok: false, message: 'Bets closed - waiting for next round' });
+    return respond({ type: 'bet', ok: false, message: 'Bets closed - waiting for next round' });
   }
 
   const option = msg.option;
@@ -129,49 +132,48 @@ async function placeBet(ws, userId, msg, ctx) {
   const roundId = game.round.roundId;
 
   if (!['andar', 'bahar', 'tie'].includes(option)) {
-    return send(ws, { type: 'bet', ok: false, message: 'Option must be andar|bahar|tie' });
+    return respond({ type: 'bet', ok: false, message: 'Option must be andar|bahar|tie' });
   }
   if (!Number.isFinite(amount) || amount <= 0) {
-    return send(ws, { type: 'bet', ok: false, message: 'Invalid amount' });
+    return respond({ type: 'bet', ok: false, message: 'Invalid amount' });
   }
 
   const multiplier = option === 'tie' ? 8.2 : 1.9;
 
-  // Place bet + deduct balance + ledger, atomically (single plpgsql function).
-  const { data: betResult, error: rpcErr } = await sb.rpc('place_bet', {
-    p_user_id: userId,
-    p_round_id: roundId,
-    p_option: option,
-    p_amount: amount,
-    p_multiplier: multiplier,
-  });
+  try {
+    const { rows: r } = await pool.query(
+      `select public.place_bet_sql($1, $2, $3, $4, $5) as out`,
+      [userId, roundId, option, amount, multiplier],
+    );
+    const out = String(r[0]?.out ?? '');
+    if (out.startsWith('ERR:')) {
+      return respond({ type: 'bet', ok: false, message: out.slice(4) });
+    }
+    const betId = Number(out.split(':').pop());
 
-  if (rpcErr) {
-    return send(ws, { type: 'bet', ok: false, message: rpcErr.message });
+    const { rows } = await pool.query(
+      `select id, round_id, option, amount, multiplier, status from public.bets where id = $1`,
+      [betId],
+    );
+
+    const { rows: bal } = await pool.query(
+      `select balance from public.profiles where id = $1`,
+      [userId],
+    );
+
+    respond({
+      type: 'bet',
+      ok: true,
+      bet: rows[0],
+      balance: bal[0] ? Number(bal[0].balance) : 0,
+    });
+  } catch (e) {
+    respond({ type: 'bet', ok: false, message: e.message });
   }
-
-  const out = String(betResult).toString();
-  if (out.startsWith('ERR:')) {
-    return send(ws, { type: 'bet', ok: false, message: out.slice(4) });
-  }
-
-  const betId = Number(out.split(':').pop());
-
-  const { data: betRow } = await sb.from('bets').select('*').eq('id', betId).single();
-
-  const balance = await currentBalance(userId);
-
-  send(ws, { type: 'bet', ok: true, bet: betRow, balance });
 }
 
-// ---------- small helpers ----------
 function requireAuth(ctx) {
   return ctx.userId || null;
-}
-
-async function currentBalance(userId) {
-  const { data } = await sb.from('profiles').select('balance').eq('id', userId).single();
-  return data ? Number(data.balance) : 0;
 }
 
 function send(ws, obj) {

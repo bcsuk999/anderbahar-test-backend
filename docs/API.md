@@ -1,6 +1,6 @@
 # Andar Bahar — User Side API Documentation
 
-Real-time game backend over **WebSocket** with **Supabase** storage and auth.
+Real-time game backend over **WebSocket** with **Supabase** storage + direct Postgres.
 
 ```
 Server URL: ws://<your-server-host>:8080
@@ -15,9 +15,16 @@ Round timer (fixed, 30 seconds total per round):
 | `result`  | 10s      | Cards dealt, Joker + match revealed, coins/anim  |
 | `reset`   | 5s       | Table cleared, next round prepared               |
 
+### Result rules (per official game rules)
+- A **Joker** card is opened in the center. Cards are dealt alternately, starting with **Andar**.
+- The round ends when a card matching the Joker's rank appears.
+- If the matching card lands on **Andar** → **Andar wins**.
+- If the matching card lands on **Bahar** → Andar/Bahar counts are equal → **TIE**.
+- On TIE: Andar and Bahar bets are **refunded**; TIE bets pay **8.2x**.
+
 Pay-out multipliers:
-- **Andar** → 1.9x
-- **Bahar** → 1.9x
+- **Andar** → 1.9x (refunded on TIE/draw)
+- **Bahar** → 1.9x (refunded on TIE/draw)
 - **Tie**   → 8.2x
 
 ---
@@ -260,11 +267,26 @@ Response:
     "dealtCards": [],
     "andarCards": 0,
     "baharCards": 0,
-    "serverTime": "2026-09-27T16:19:44.000Z",
+    "serverTime": 1770000000000,
+    "serverTimeISO": "2026-09-27T16:19:44.000Z",
+    "phaseEndsAtMs": 1770000012000,
+    "nextRoundAtMs": null,
     "nextRoundAt": null
   }
 }
 ```
+
+### Clock sync (epoch timestamps)
+
+All timestamps use **millisecond epoch**:
+- `serverTime` — server time at message creation.
+- `phaseEndsAtMs` — exact moment the current phase ends; **use this for the
+  countdown**: `Math.max(0, (phaseEndsAtMs - Date.now()) / 1000)`.
+- `nextRoundAtMs` — when the next round starts (present during `reset`).
+
+On connect, compute `offset = serverTime - Date.now()` once, then always render
+`remaining = phaseEndsAtMs - (Date.now() + offset)`. This keeps every client's timer
+accurate even if a broadcast is delayed.
 
 Also use this on reconnect to re-sync the clock.
 
@@ -350,6 +372,9 @@ During each round the server pushes state automatically. No need to poll `game_s
 }
 ```
 
+`winner` is `"andar"` or `"tie"` (a match landing on Bahar's deal means equal
+counts → TIE; Andar/Bahar bets are refunded and TIE bets are paid 8.2x).
+
 The client should run the 10s **result/animation phase** here — reveal joker, deal cards
 one by one (Andar ↔ Bahar alternating), show winning side + coin animation.
 
@@ -403,7 +428,7 @@ ws send  login                 → { type: "login", ok, token, user{balance} }
           { type: "game_state" }  → current phase/timer
 (server) push round_started    → { type: "round_started", phase:"betting", remaining:15 }
 ws send  { type:"bet", option:"bahar", amount:1000 } → { type:"bet", ok, balance }
-(server) push result           → { type:"result", joker:"7S", winner:"bahar", dealtCards:[...] }
+(server) push result           → { type:"result", joker:"7S", winner:"andar", dealtCards:[...] }
           client plays 10s result animation (cards + coins)
 (server) push reset            → { type:"reset", remaining:5 }
           client clears table

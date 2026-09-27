@@ -1,21 +1,21 @@
 import { config, requireConfig } from './config.js';
 import { GameEngine } from './game.js';
 import { createWSServer } from './ws.js';
-import { sb } from './supabase.js';
+import { pool } from './db.js';
 
 console.log('==============================================');
 console.log('  Andar Bahar Backend');
 console.log('==============================================');
 
-requireConfig('supabaseUrl', 'supabasePublishableKey', 'supabaseSecretKey', 'jwtSecret');
+requireConfig('databaseUrl');
 
 // Quick DB connectivity check.
 try {
-  const { error } = await sb.from('game_rounds').select('id').limit(1);
-  if (error) console.warn('  DB check warning:', error.message);
-  else console.log('  Supabase connected ✔');
+  const r = await pool.query('select 1 as ok');
+  if (r.rows[0].ok === 1) console.log('  Postgres connected ✓');
 } catch (e) {
-  console.warn('  DB check warning:', e.message);
+  console.warn('  Postgres connection warning:', e.message);
+  process.exit(1);
 }
 
 // Start game engine (30s round loop: 15 betting / 10 result / 5 reset).
@@ -23,6 +23,7 @@ const game = new GameEngine();
 game.start();
 
 console.log(`  Round timer: ${config.bettingTime}s betting / ${config.resultTime}s result / ${config.resetTime}s reset`);
+console.log(`  Signup bonus: ₹${config.signupBonus}`);
 
 // Start WebSocket server.
 const { wss } = createWSServer({ game });
@@ -32,5 +33,13 @@ console.log('==============================================');
 process.on('SIGINT', () => {
   game.stop();
   wss.close();
+  pool.end();
   process.exit(0);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED REJECTION:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err);
 });

@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.log
+dbcheck.mjs
+skills-lock.json
+*.out.log
+*.err.log

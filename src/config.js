@@ -23,6 +23,7 @@ export const config = {
   supabasePublishableKey: process.env.SUPABASE_PUBLISHABLE_KEY,
   supabaseSecretKey: process.env.SUPABASE_SECRET_KEY,
   jwksUrl: process.env.SUPABASE_JWKS_URL,
+  databaseUrl: process.env.DATABASE_URL,
   port: Number(process.env.PORT || 8080),
   host: process.env.HOST || '0.0.0.0',
   bettingTime: Number(process.env.BETTING_TIME || 15),

@@ -67,6 +67,9 @@ create table if not exists public.bets (
 create index if not exists idx_bets_round on public.bets(round_id);
 create index if not exists idx_bets_user_round on public.bets(user_id, round_id);
 
+-- ============ 4. BETS ============
+create sequence if not exists public.round_seq;
+
 -- ============ 5. RLS (Row Level Security) ============
 alter table public.profiles enable row level security;
 alter table public.transactions enable row level security;
@@ -104,23 +107,6 @@ create trigger trg_profiles_updated before update on public.profiles
   for each row execute function public.set_updated_at();
 
 -- ============ 7. SIGNUP BONUS FUNCTION ============
--- Called by the server (service role) right after sign-up.
--- Credits 10000 INR and writes a ledger entry.
-create or replace function public.credit_signup_bonus(
-  p_user_id uuid,
-  p_mobile text,
-  p_bonus numeric
-) returns void language plpgsql as $$
-declare
-  v_balance numeric;
-begin
-  insert into public.profiles (id, mobile, username, balance, total_bonus)
-  values (p_user_id, p_mobile, 'Player' || right(p_mobile, 4), p_bonus, p_bonus)
-  on conflict (id) do update set total_bonus = public.profiles.total_bonus
-  returning balance into v_balance;
-
-  select balance into v_balance from public.profiles where id = p_user_id;
-
-  insert into public.transactions (user_id, type, amount, balance, ref_type, note)
-  values (p_user_id, 'signup_bonus', p_bonus, v_balance, 'manual', 'Welcome bonus');
-end; $$;
+-- Defined in functions.sql (public.credit_signup_bonus) together with
+-- public.create_game_user so registration + bonus + ledger happen in one
+-- transaction. Run functions.sql AFTER schema.sql.

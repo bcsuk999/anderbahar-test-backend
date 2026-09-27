@@ -1,70 +1,68 @@
-import { sb } from './supabase.js';
+import { pool, one, rows } from './db.js';
 
 /**
- * GET LEDGER
- * Returns the user's transaction history (newest first) with balance.
+ * GET LEDGER — player's transaction history (newest first).
  */
 export async function getLedger(userId, { limit = 50, offset = 0 } = {}) {
-  const { data, error } = await sb
-    .from('transactions')
-    .select('id, type, amount, balance, ref_type, ref_id, note, created_at')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .range(offset, offset + limit - 1);
-
-  if (error) return { ok: false, message: error.message };
+  const data = await rows(
+    `select id, type, amount, balance, ref_type, ref_id, note, created_at
+       from public.transactions
+      where user_id = $1
+      order by created_at desc, id desc
+      limit $2 offset $3`,
+    [userId, Math.min(limit, 100), offset],
+  );
   return { ok: true, transactions: data };
 }
 
 /**
- * GET BALANCE reasons — returns current balance + available chip values.
+ * GET BALANCE + available chip values.
  */
 export async function getBalance(userId) {
-  const { data, error } = await sb
-    .from('profiles')
-    .select('balance')
-    .eq('id', userId)
-    .single();
-
-  if (error) return { ok: false, message: error.message };
+  const profile = await one(`select balance from public.profiles where id = $1`, [userId]);
+  if (!profile) return { ok: false, message: 'User not found' };
   return {
     ok: true,
-    balance: Number(data.balance),
+    balance: Number(profile.balance),
     chipValues: [100, 500, 1000, 5000, 10000],
   };
 }
 
 /**
- * MANUAL ADD/SUBTRACT (admin/server only) - kept for deposits/withdrawals later.
+ * MANUAL ADD/SUBTRACT (for deposits/withdrawals later).
  */
 export async function adjustBalance(userId, type, amount) {
-  const { data: profile } = await sb
-    .from('profiles')
-    .select('balance')
-    .eq('id', userId)
-    .single();
-
-  if (!profile) return { ok: false, message: 'User not found' };
-
-  const newBalance = Number(profile.balance) + amount;
-  if (newBalance < 0) return { ok: false, message: 'Insufficient balance' };
-
-  const { error: upErr } = await sb
-    .from('profiles')
-    .update({ balance: newBalance })
-    .eq('id', userId);
-
-  if (upErr) return { ok: false, message: upErr.message };
-
-  const { error: txErr } = await sb.from('transactions').insert({
-    user_id: userId,
-    type,
-    amount,
-    balance: newBalance,
-    ref_type: 'manual',
-    note: 'Manual adjustment',
-  });
-
-  if (txErr) return { ok: false, message: txErr.message };
-  return { ok: true, balance: newBalance };
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const profile = await client.query(
+      `select balance from public.profiles where id = $1 for update`,
+      [userId],
+    );
+    if (!profile.rows[0]) {
+      await client.query('rollback');
+      return { ok: false, message: 'User not found' };
+    }
+    const newBalance = Number(profile.rows[0].balance) + amount;
+    if (newBalance < 0) {
+      await client.query('rollback');
+      return { ok: false, message: 'Insufficient balance' };
+    }
+    await client.query(
+      `update public.profiles set balance = $1, updated_at = now() where id = $2`,
+      [newBalance, userId],
+    );
+    await client.query(
+      `insert into public.transactions (user_id, type, amount, balance, ref_type, ref_id, note)
+       values ($1, $2, $3, $4, 'manual', null, 'Manual adjustment')`,
+      [userId, type, amount, newBalance],
+    );
+    await client.query('commit');
+    return { ok: true, balance: newBalance };
+  } catch (e) {
+    await client.query('rollback');
+    return { ok: false, message: e.message };
+  } finally {
+    client.release();
+  }
 }

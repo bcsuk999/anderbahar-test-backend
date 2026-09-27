@@ -1,4 +1,5 @@
-import { sb } from './supabase.js';
+import { createHmac } from 'node:crypto';
+import { pool, one } from './db.js';
 import { config } from './config.js';
 
 const MOBILE_RE = /^[6-9]\d{9}$/;
@@ -13,9 +14,8 @@ export function validatePassword(pass) {
 
 /**
  * REGISTER
- * Creates a Supabase auth user keyed by the 10-digit mobile as the phone.
- * Credits the signup bonus + writes the ledger (via plpgsql function).
- * Returns { ok, user, token }.
+ * Creates the user directly in Postgres (auth.users + profiles + ledger),
+ * credits the signup bonus atomically via public.create_game_user.
  */
 export async function register(mobile, password, username) {
   if (!validateMobile(mobile)) {
@@ -25,65 +25,44 @@ export async function register(mobile, password, username) {
     return { ok: false, message: 'Password must be at least 6 characters' };
   }
 
-  const phone = '+91' + mobile.trim();
+  const m = mobile.trim();
+  const u = username?.trim() || `Player${m.slice(-4)}`;
 
-  const { data, error } = await sb.auth.admin.createUser({
-    phone,
-    phone_confirm: true,
-    password,
-    email_confirm: true,
-  });
+  try {
+    const { rows: r } = await pool.query(
+      `select public.create_game_user($1, $2, $3, $4) as user_id`,
+      [m, password, config.signupBonus, u],
+    );
+    const userId = r[0]?.user_id;
 
-  if (error) {
-    if (error.message && error.message.toLowerCase().includes('already')) {
-      return { ok: false, message: 'This mobile number is already registered' };
-    }
-    return { ok: false, message: error.message };
+    const profile = await getUserProfile(userId);
+
+    return {
+      ok: true,
+      token: signGameToken(userId),
+      user: {
+        id: userId,
+        mobile: m,
+        username: u,
+        balance: Number(profile.balance),
+        signupBonus: config.signupBonus,
+      },
+    };
+  } catch (e) {
+    const code = e.message?.match(/^([A-Z_]+)/)?.[1];
+    const map = {
+      INVALID_MOBILE: 'Mobile must be a valid 10-digit Indian number (6-9xxxxxxxxx)',
+      WEAK_PASSWORD: 'Password must be at least 6 characters',
+      MOBILE_ALREADY_REGISTERED: 'This mobile number is already registered',
+    };
+    return { ok: false, message: map[code] || e.message };
   }
-
-  const userId = data.user.id;
-
-  // Credit 10000 INR signup bonus + ledger, atomically server-side.
-  const { error: fnErr } = await sb.rpc('credit_signup_bonus', {
-    p_user_id: userId,
-    p_mobile: mobile.trim(),
-    p_bonus: config.signupBonus,
-  });
-
-  if (fnErr) {
-    console.error('signup bonus credit failed:', fnErr.message);
-  }
-
-  const { data: profile } = await sb
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .single();
-
-  const tokenAuth = await sb.auth.admin.generateLink({
-    type: 'magiclink',
-    phone,
-  });
-
-  // Issue a game token: we sign the user id ourselves for WebSocket auth.
-  const token = signGameToken(userId);
-
-  return {
-    ok: true,
-    token,
-    user: {
-      id: userId,
-      mobile: mobile.trim(),
-      username: profile?.username || username || 'Player',
-      balance: Number(profile?.balance ?? config.signupBonus),
-      signupBonus: config.signupBonus,
-    },
-  };
 }
 
 /**
  * LOGIN
- * Signs in via Supabase phone + password (we set support_phone=true for password auth on register).
+ * Verifies phone + bcrypt password directly against auth.users.
+ * (Same hashing as Supabase Auth, but no SMS/dashboard config needed.)
  */
 export async function login(mobile, password) {
   if (!validateMobile(mobile)) {
@@ -95,40 +74,48 @@ export async function login(mobile, password) {
 
   const phone = '+91' + mobile.trim();
 
-  const { data, error } = await sbPublic.auth.signInWithPassword({
-    phone,
-    password,
-  });
+  const user = await one(
+    `select u.id, u.phone,
+            u.encrypted_password = crypt($2, u.encrypted_password) as pass_ok,
+            p.username, p.balance
+       from auth.users u
+       left join public.profiles p on p.id = u.id
+      where u.phone = $1 and u.deleted_at is null
+        and u.created_at is not null`,
+    [phone, password],
+  );
 
-  if (error) {
+  if (!user || !user.pass_ok) {
     return { ok: false, message: 'Invalid mobile number or password' };
   }
 
-  const userId = data.user.id;
-
-  const { data: profile } = await sb
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .single();
-
-  const token = signGameToken(userId);
-
   return {
     ok: true,
-    token,
+    token: signGameToken(user.id),
     user: {
-      id: userId,
+      id: user.id,
       mobile: mobile.trim(),
-      username: profile?.username || 'Player',
-      balance: Number(profile?.balance ?? 0),
+      username: user.username || `Player${mobile.trim().slice(-4)}`,
+      balance: Number(user.balance ?? 0),
     },
   };
 }
 
-// ---- Minimal game token signing (HS256) --------------------
-import { createHmac } from 'node:crypto';
+// ---- helpers -----
+export async function getUserProfile(userId, mobile) {
+  const p = await one(`select * from public.profiles where id = $1`, [userId]);
+  if (!p && mobile) {
+    return {
+      id: userId,
+      mobile,
+      username: `Player${mobile.slice(-4)}`,
+      balance: 0,
+    };
+  }
+  return p;
+}
 
+// ---- Minimal game token signing (HS256) --------------------
 function b64url(data) {
   return Buffer.from(data).toString('base64url');
 }
