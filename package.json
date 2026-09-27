@@ -1,0 +1,16 @@
+{
+  "name": "andar-bahar-backend",
+  "version": "1.0.0",
+  "description": "Andar Bahar game backend - WebSocket + Supabase",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@supabase/server": "^1.8.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "ws": "^8.18.0"
+  }
+}
