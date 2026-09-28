@@ -1,5 +1,5 @@
 import dns from 'node:dns';
-import { config, requireConfig } from './config.js';
+import { config, requireConfig, logEnvStatus } from './config.js';
 import { GameEngine } from './game.js';
 import { createWSServer } from './ws.js';
 import { pool } from './db.js';
@@ -11,15 +11,30 @@ dns.setDefaultResultOrder('ipv4first');
 console.log('==============================================');
 console.log('  Andar Bahar Backend');
 console.log('==============================================');
+logEnvStatus();
 
 requireConfig('databaseUrl');
 
 // Quick DB connectivity check.
+const dbHost = (() => {
+  try { return new URL(config.databaseUrl).hostname; } catch { return '(unparseable DATABASE_URL)'; }
+})();
+console.log(`  Resolving DB host: ${dbHost}`);
+try {
+  dns.lookup(dbHost, { all: true }, (err, addrs) => {
+    if (err) return console.error(`  DNS lookup FAILED: ${err.message}`);
+    console.log(`  DNS results: ${addrs.map((a) => `${a.address} (${a.family === 4 ? 'IPv4' : 'IPv6'})`).join(', ')}`);
+  });
+} catch (e) {
+  console.error('  DNS lookup threw:', e.message);
+}
+
 try {
   const r = await pool.query('select 1 as ok');
   if (r.rows[0].ok === 1) console.log('  Postgres connected ✓');
 } catch (e) {
-  console.warn('  Postgres connection warning:', e.message);
+  console.error('  Postgres connection FAILED:', e.message);
+  console.error('  (check that Render can reach the Supabase IPv4 address, and DATABASE_URL in the Environment tab)');
   process.exit(1);
 }
 

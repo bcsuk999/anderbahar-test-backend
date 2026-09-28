@@ -22,6 +22,13 @@ export const pool = new pg.Pool({
   connectionTimeoutMillis: 15000,
 });
 
+// Surface every connection failure with the resolved address + code, so Render
+// logs show the exact reason (ENETUNREACH, ETIMEDOUT, auth, SSL...) and host.
+pool.on('error', (err) => {
+  console.error('  [pool] idle client error:', err.message, err.code ?? '');
+});
+pool.on('connect', () => console.log('  [pool] connected to Postgres'));
+
 /** Run a query. */
 export function q(text, params) {
   return pool.query(text, params);

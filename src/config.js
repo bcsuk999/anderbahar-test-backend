@@ -41,3 +41,16 @@ export function requireConfig(...keys) {
     }
   }
 }
+
+// Print which env vars are present (values masked) so Render logs reveal
+// exactly what the server sees on startup.
+export function logEnvStatus() {
+  const mask = (v) => (v == null ? 'UNSET' : v.includes('PLACEHOLDER') ? 'PLACEHOLDER' : 'SET');
+  console.log('  ENV status:');
+  console.log(`    DATABASE_URL           ${mask(config.databaseUrl)}   ${config.databaseUrl ? config.databaseUrl.replace(/\/\/.*@/, '//***:***@') : ''}`);
+  console.log(`    JWT_SECRET             ${mask(config.jwtSecret)}`);
+  console.log(`    SUPABASE_URL           ${mask(config.supabaseUrl)}`);
+  console.log(`    SUPABASE_PUBLISHABLE_KEY ${mask(config.supabasePublishableKey)}`);
+  console.log(`    PORT/HOST              ${config.port}/${config.host}`);
+  console.log(`    timers                 bet=${config.bettingTime}s res=${config.resultTime}s reset=${config.resetTime}s`);
+}
