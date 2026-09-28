@@ -1,7 +1,13 @@
 import pg from 'pg';
+import dns from 'node:dns';
 import { config, requireConfig } from './config.js';
 
 requireConfig('databaseUrl');
+
+// Force IPv4 DNS resolution FIRST. Render/Railway often lack IPv6 routes, and
+// Node's dns.lookup may otherwise return the IPv6 address first (ENETUNREACH
+// at connect). Must be set before any connection attempt.
+dns.setDefaultResultOrder('ipv4first');
 
 // Direct Postgres pool — the primary database layer for this backend.
 // (Connection string from Supabase Dashboard -> Connect -> Session pooler / direct.)

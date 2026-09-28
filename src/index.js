@@ -1,7 +1,12 @@
+import dns from 'node:dns';
 import { config, requireConfig } from './config.js';
 import { GameEngine } from './game.js';
 import { createWSServer } from './ws.js';
 import { pool } from './db.js';
+
+// Force IPv4 DNS resolution FIRST. Render/Railway often lack IPv6 routes, and
+// Node may otherwise pick the IPv6 address (ENETUNREACH) before IPv4.
+dns.setDefaultResultOrder('ipv4first');
 
 console.log('==============================================');
 console.log('  Andar Bahar Backend');
